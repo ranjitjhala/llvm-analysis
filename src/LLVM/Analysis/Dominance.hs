@@ -70,14 +70,6 @@ data PostdominatorTree = PDT { pdtTree :: DomTreeType
                              , pdtRoots :: [Instruction]
                              }
 
-
-
--- | Return all successor edges in a given CFG
-immediateSuccessors :: CFG -> [(Instruction, Instruction)]
-immediateSuccessors CFG { cfgGraph = g } =
-  map (toInst g *** toInst g) (edges g)
-
-
 -- | Compute the immediate dominators for a given CFG
 immediateDominators :: CFG -> [(Instruction, Instruction)]
 immediateDominators CFG { cfgGraph = g, cfgEntryNode = root } =
