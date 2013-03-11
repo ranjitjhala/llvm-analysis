@@ -1,17 +1,16 @@
-{-# LANGUAGE TypeSynonymInstances, FlexibleInstances, MultiParamTypeClasses #-}
+{-# LANGUAGE NoMonomorphismRestriction #-}
 -- | An analysis to identify functions that never return to their
 -- caller.  This only counts calls to exit, abort, or similar.
 -- Notably, exceptions are not considered since the caller can catch
 -- those.
 --
 -- The dataflow fact is "Function does not return".  It starts at
--- False (top) and calls to termination functions move it to True.
--- The meet operator is &&.  The final result for a function is
--- computed by meeting all of the values at the *reachable* exit
--- instructions.  If no paths can return, this will be &&(True...),
--- which is True.
+-- False (top) and calls to termination functions (or the unreachable
+-- instruction) move it to True.
+--
+-- Meet is &&.  Functions are able to return as long as at least one
+-- path can return.
 module LLVM.Analysis.NoReturn (
-  NoReturnSummary,
   noReturnAnalysis
   ) where
 
@@ -23,20 +22,28 @@ import LLVM.Analysis
 import LLVM.Analysis.CFG
 import LLVM.Analysis.Dataflow
 
-type NoReturnSummary = HashSet Function
+-- | The dataflow fact; Bool is not enough.  Top is "NotReturned" -
+-- the function has not returned yet.  Return instructions will
+-- transfer to "Returned".  However, we want to distinguish between
+-- "Hasn't returned yet" and "Can never return" in case we see a call
+-- to a function we know cannot return (but LLVM does not).
+--
+-- If LLVM recognizes that something cannot return, it will add an
+-- unreachable instruction (from which we also return NeverReturns).
+--
+-- If even a single Returned value is incoming to the exit node, the
+-- function can return.
+data ReturnInfo = NotReturned
+                | Returned
+                | WillNeverReturn
+                deriving (Show, Eq)
 
--- | The dataflow fact represents the fact that the "Function does not
--- return".  It is a simple wrapper around Bool
-data ReturnInfo = RI { unRI :: !Bool }
-                deriving (Show)
-instance Eq ReturnInfo where
-  (RI r1) == (RI r2) = r1 == r2
-
-instance MeetSemiLattice ReturnInfo where
-  meet (RI r1) (RI r2) = RI (r1 && r2)
-
-instance BoundedMeetSemiLattice ReturnInfo where
-  top = RI False
+meet :: ReturnInfo -> ReturnInfo -> ReturnInfo
+meet Returned _ = Returned
+meet _ Returned = Returned
+meet WillNeverReturn _ = WillNeverReturn
+meet _ WillNeverReturn = WillNeverReturn
+meet NotReturned NotReturned = NotReturned
 
 data AnalysisEnvironment m =
   AE { externalSummary :: ExternalFunction -> m Bool
@@ -47,9 +54,9 @@ data AnalysisEnvironment m =
 -- to test ExternalFunctions
 type AnalysisMonad m = ReaderT (AnalysisEnvironment m) m
 
-instance (Monad m) => DataflowAnalysis (AnalysisMonad m) ReturnInfo where
-  transfer = returnTransfer
-
+-- | The functions in the returned set are those that do not return.
+--
+-- Warning, this return type may become abstract at some point.
 noReturnAnalysis :: (Monad m, HasCFG cfg)
                     => (ExternalFunction -> m Bool)
                     -> cfg
@@ -59,13 +66,12 @@ noReturnAnalysis extSummary cfgLike summ = do
   let cfg = getCFG cfgLike
       f = getFunction cfg
       env = AE extSummary summ
-  localRes <- runReaderT (forwardDataflow top cfg) env
-  let exitInsts = filter (instructionReachable cfg) (functionExitInstructions f)
-      exitInfos = map (dataflowResult localRes) exitInsts
-      exitVal = foldr ((&&) . unRI) True exitInfos
-  case exitVal of
-    False -> return summ
-    True -> return $! S.insert f summ
+      analysis = dataflowAnalysis NotReturned meet returnTransfer
+  localRes <- runReaderT (forwardDataflow cfg analysis NotReturned) env
+  case dataflowResult localRes of
+    WillNeverReturn -> return $! S.insert f summ
+    NotReturned -> return $! S.insert f summ
+    Returned -> return summ
 
 returnTransfer :: (Monad m) => ReturnInfo -> Instruction -> AnalysisMonad m ReturnInfo
 returnTransfer ri i =
@@ -74,6 +80,9 @@ returnTransfer ri i =
       dispatchCall ri calledFunc
     InvokeInst { invokeFunction = calledFunc } ->
       dispatchCall ri calledFunc
+    UnreachableInst {} -> return WillNeverReturn
+    ResumeInst {} -> return WillNeverReturn
+    RetInst {} -> return Returned
     _ -> return ri
 
 dispatchCall :: (Monad m) => ReturnInfo -> Value -> AnalysisMonad m ReturnInfo
@@ -82,13 +91,13 @@ dispatchCall ri v =
     FunctionC f -> do
       intSumm <- asks internalSummary
       case S.member f intSumm of
-        True -> return $! RI True
+        True -> return WillNeverReturn
         False -> return ri
     ExternalFunctionC ef -> do
       extSumm <- asks externalSummary
       isNoRet <- lift $ extSumm ef
       case isNoRet of
-        True -> return $! RI True
+        True -> return WillNeverReturn
         False -> return ri
     _ -> return ri
 

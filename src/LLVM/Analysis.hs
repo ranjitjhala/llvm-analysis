@@ -3,12 +3,29 @@
 -- LLVM.Analysis provide higher-level tools for analyzing the IR.
 module LLVM.Analysis (
   -- * Parsing LLVM Bitcode
-
   -- $parsing
-  module Data.LLVM.Types
+
+  -- * Types
+  module Data.LLVM.Types,
+
+  -- * Extra helpers
+  FuncLike(..),
+  ToGraphviz(..)
   ) where
 
+import Data.GraphViz ( DotGraph )
 import Data.LLVM.Types
+
+-- | A class for types that can be derived from a Function.
+class FuncLike a where
+  fromFunction :: Function -> a
+
+instance FuncLike Function where
+  fromFunction = id
+
+-- | A class for things that can be converted to graphviz graphs
+class ToGraphviz a where
+  toGraphviz :: a -> DotGraph Int
 
 -- $parsing
 --

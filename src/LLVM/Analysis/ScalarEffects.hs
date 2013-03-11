@@ -1,4 +1,4 @@
-{-# LANGUAGE ViewPatterns, FlexibleInstances, MultiParamTypeClasses #-}
+{-# LANGUAGE ViewPatterns, NoMonomorphismRestriction #-}
 {-|
 
 This analysis identifies the (memory) effects that functions have on
@@ -53,20 +53,14 @@ instance Eq ScalarInfo where
   SITop == SITop = True
   _ == _ = False
 
-instance MeetSemiLattice ScalarInfo where
-  meet SITop s = s
-  meet s SITop = s
-  meet (SI s1) (SI s2) = SI (HM.unionWith mergeEffect s1 s2)
-    where
-      -- | If there is an entry in both maps, it must be the same to be
-      -- retained.
-      mergeEffect e1 e2 = if e1 == e2 then e1 else Nothing
-
-instance BoundedMeetSemiLattice ScalarInfo where
-  top = SITop
-
-instance (Monad m) => DataflowAnalysis m ScalarInfo where
-  transfer = scalarTransfer
+meet :: ScalarInfo -> ScalarInfo -> ScalarInfo
+meet SITop s = s
+meet s SITop = s
+meet (SI s1) (SI s2) = SI (HM.unionWith mergeEffect s1 s2)
+  where
+    -- | If there is an entry in both maps, it must be the same to be
+    -- retained.
+    mergeEffect e1 e2 = if e1 == e2 then e1 else Nothing
 
 -- For each function, initialize all arguments to Nothing
 scalarEffectAnalysis :: (Monad m, HasCFG funcLike, HasFunction funcLike)
@@ -75,17 +69,13 @@ scalarEffectAnalysis :: (Monad m, HasCFG funcLike, HasFunction funcLike)
                         -> m ScalarEffectResult
 scalarEffectAnalysis funcLike summ = do
   let cfg = getCFG funcLike
-      f = getFunction funcLike
-      s0 = SI $ HM.fromList (zip (functionParameters f) (repeat Nothing))
+      analysis = dataflowAnalysis SITop meet scalarTransfer
 
-  localRes <- forwardDataflow s0 cfg
-
-  let exitInsts = filter (instructionReachable cfg) (functionExitInstructions f)
-      exitInfo = meets $ map (dataflowResult localRes) exitInsts
-      exitInfo' = case exitInfo of
+  localRes <- forwardDataflow cfg analysis SITop
+  let xi = case dataflowResult localRes of
         SITop -> HM.empty
         SI m -> HM.foldlWithKey' discardNothings HM.empty m
-  return $! HM.union exitInfo' summ
+  return $! HM.union xi summ
 
 discardNothings :: HashMap Argument ScalarEffect
                    -> Argument
